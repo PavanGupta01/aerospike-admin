@@ -17,6 +17,7 @@ from lib import util
 import time, os, sys, platform, shutil, urllib2, socket
 from distutils.version import StrictVersion
 import zipfile
+import copy
 
 def flip_keys(orig_data):
     new_data = {}
@@ -418,6 +419,17 @@ class ShowConfigController(CommandController):
 
 @CommandHelp('"show health" is used to display Aerospike configuration health')
 class ShowHealthController(CommandController):
+    HIGH_WATER_MEMEORY_PCT = 'high-water-memory-pct'
+    FREE_PCT_MEMORY = 'free-pct-memory'
+    HWM_WARN_CHECK_PCT = 10
+
+    NS_HEALTH_PARAMS_LOOKUP = [
+                                HIGH_WATER_MEMEORY_PCT,
+                                FREE_PCT_MEMORY
+                              ]
+    NS_HEALTH_PARAMS = {
+                          HIGH_WATER_MEMEORY_PCT : 'OK',
+                       }
     def __init__(self):
         self.modifiers = set(['with', 'like'])
     
@@ -430,72 +442,25 @@ class ShowHealthController(CommandController):
     def get_namespaces_health(self, namespace_config = ''):
         namespaces_health = dict()
         for ns, nodes in namespace_config.items():
-            health_params = {   'min-avail-pct' : 'OK',
-                                'stop-writes' : 'OK',
-                                'hwm-breached' : 'OK',
-                                'memory-size' : 'OK',
-                                'high-water-disk-pct' : 'OK',
-                                'high-water-memory-pct' : 'OK',
-                                'stop-writes-pct' : 'OK',
-                                'repl-factor' : 'OK',
-                                'set-evicted-objects' : 'OK'
-                            }
-            memory_size = ''
-            high_water_disk_pct = ''
-            high_water_memory_pct = ''
-            stop_wirtes_pct = ''
-            repl_factor = ''
-            set_evicted_objects = ''
-            min_avail_pct = ''
+            namespaces_health[ns] = dict()
+            for ip, params in nodes.items():
+                health_params = copy.deepcopy(ShowHealthController.NS_HEALTH_PARAMS)
+                high_water_memory_pct = int(params[ShowHealthController.HIGH_WATER_MEMEORY_PCT])
+                used_memory_pct = 100 - int(params[ShowHealthController.FREE_PCT_MEMORY])
+                hwm_warn_range = range(high_water_memory_pct - (high_water_memory_pct * ShowHealthController.HWM_WARN_CHECK_PCT / 100) , high_water_memory_pct)
 
-            for i, ip in enumerate(nodes.keys()):
-                # TODO: check for missing key.
-                if i == 0:
-                    memory_size = namespace_config[ns][ip].get('memory-size')
-                    high_water_disk_pct = namespace_config[ns][ip].get('high-water-disk-pct')
-                    high_water_memory_pct = namespace_config[ns][ip].get('high-water-memory-pct')
-                    stop_wirtes_pct = namespace_config[ns][ip].get('stop-wirtes-pct')
-                    repl_factor = namespace_config[ns][ip].get('repl-factor')
-                    set_evicted_objects = namespace_config[ns][ip].get('set-evicted-objects')
-                    min_avail_pct = namespace_config[ns][ip].get('min-avail-pct')
+                if high_water_memory_pct > 65 or used_memory_pct in hwm_warn_range:
+                    health_params[ShowHealthController.HIGH_WATER_MEMEORY_PCT] = 'WARNING'
+                if used_memory_pct >= high_water_memory_pct:
+                    health_params[ShowHealthController.HIGH_WATER_MEMEORY_PCT] = 'CRITICAL'
 
-                def update_health(param, comparator, result):
-                    if namespace_config[ns][ip].get(param) != comparator:
-                        health_params[param] = result
-                try:
-                    if int(min_avail_pct) < 20 and int(min_avail_pct) > 5:
-                        health_params['min-avail-pct'] = 'WARNING'
-                    elif not int(min_avail_pct)  > 20:
-                        health_params['min-avail-pct'] = 'CRITICAL'
-                except:
-                    # TODO: Missing 'min-avail-pct' key entry for any of the node
-                    pass
-
-                update_health('stop-writes', 'false', 'CRITICAL')
-                update_health('hwm-breached', 'false', 'WARNING')
-                update_health('memory-size', memory_size, 'WARNING')
-                update_health('high-water-disk-pct', high_water_disk_pct, 'WARNING')
-                update_health('high-water-memory-pct', high_water_memory_pct, 'WARNING')
-                update_health('stop-wirtes-pct', stop_wirtes_pct, 'WARNING')
-                update_health('repl-factor', repl_factor, 'CRITICAL')
-                update_health('set-evicted-objects', set_evicted_objects, 'WARNING')
-            namespaces_health[ns] = health_params
+                namespaces_health[ns][ip] = health_params
+#                 namespaces_health[ns][ip] = params
         return namespaces_health
     
     @CommandHelp('Displays namespace health')
     def do_namespace(self, line):
-        health_params = [   'min-avail-pct', 
-                            'stop-writes',
-                            'hwm-breached',
-                            'memory-size',
-                            'high-water-disk-pct',
-                            'high-water-memory-pct',
-                            'stop-writes-pct',
-                            'repl-factor',
-                            'set-evicted-objects'
-                        ]
         namespaces = self.cluster.infoNamespaces(nodes=self.nodes)
-
         namespaces = namespaces.values()
         namespace_set = set()
         namespace_stats = dict()
@@ -503,7 +468,6 @@ class ShowHealthController(CommandController):
             if isinstance(namespace, Exception):
                 continue
             namespace_set.update(namespace)
-
         for namespace in sorted(namespace_set):
             ns_stats = self.cluster.infoNamespaceStatistics(namespace
                                                             , nodes=self.nodes)
@@ -512,7 +476,7 @@ class ShowHealthController(CommandController):
                     del ns_stats[node]
                 else:
                     for param in params.keys():
-                        if param not in health_params:
+                        if param not in ShowHealthController.NS_HEALTH_PARAMS_LOOKUP:
                             del ns_stats[node][param]
             namespace_stats[namespace] = ns_stats
         ns_health = self.get_namespaces_health(namespace_stats)
